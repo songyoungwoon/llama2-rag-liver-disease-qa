@@ -10,6 +10,7 @@ from database import Base
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = {"schema": "heparag"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False)
@@ -21,9 +22,10 @@ class User(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = {"schema": "heparag"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
+    user_id = Column(UUID(as_uuid=True), ForeignKey("heparag.users.id", ondelete="CASCADE"))
     title = Column(Text)
     message_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -34,9 +36,10 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = {"schema": "heparag"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"))
+    conversation_id = Column(UUID(as_uuid=True), ForeignKey("heparag.conversations.id", ondelete="CASCADE"))
     sequence_number = Column(Integer, nullable=False)
     role = Column(String(20))
     content = Column(Text, nullable=False)
@@ -47,6 +50,7 @@ class Message(Base):
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = {"schema": "heparag"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(Text)
@@ -56,9 +60,10 @@ class Document(Base):
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
+    __table_args__ = {"schema": "heparag"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"))
+    document_id = Column(UUID(as_uuid=True), ForeignKey("heparag.documents.id", ondelete="CASCADE"))
     content = Column(Text, nullable=False)
     embedding = Column(Vector(1024))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
