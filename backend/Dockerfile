@@ -1,22 +1,27 @@
-# Python 3.11 slim 이미지
-FROM python:3.10-slim
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
-# 시스템 패키지 설치
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# 작업 디렉토리 생성
 WORKDIR /app
 
-# requirements 먼저 복사 (캐시 최적화)
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    build-essential \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
 COPY requirements.txt .
 
-# 패키지 설치
+RUN pip install --upgrade pip
+
+# CUDA prebuilt wheel
+RUN pip install llama-cpp-python \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 앱 코드 복사
 COPY . .
 
-# FastAPI 실행
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

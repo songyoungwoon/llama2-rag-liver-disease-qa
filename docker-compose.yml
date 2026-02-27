@@ -21,6 +21,14 @@ services:
       retries: 10
 
   backend:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    runtime: nvidia
     build: ./backend
     container_name: backend
     depends_on:
@@ -32,6 +40,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
+      - ./backend:/models:/app/models
     restart: always
 
   pgadmin:
