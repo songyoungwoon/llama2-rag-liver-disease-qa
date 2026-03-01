@@ -1,10 +1,20 @@
 import { useState } from "react";
 
-function ChatInput() {
+type ChatInputProps = {
+  onSend: (message: string) => void | Promise<void>;
+  disabled?: boolean;
+};
+
+function ChatInput({ onSend, disabled = false }: ChatInputProps) {
   const [message, setMessage] = useState("");
 
-  const handleSend = () => {
-    console.log(message);
+  const handleSend = async () => {
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage || disabled) {
+      return;
+    }
+
+    await onSend(trimmedMessage);
     setMessage("");
   };
 
@@ -16,9 +26,16 @@ function ChatInput() {
           placeholder="Ask about liver disease guidelines..."
           value={message}
           onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              void handleSend();
+            }
+          }}
+          disabled={disabled}
         />
         <button
-          onClick={handleSend}
+          onClick={() => void handleSend()}
+          disabled={disabled}
           className="bg-blue-600 hover:bg-blue-500 px-4 rounded-lg"
         >
           Send

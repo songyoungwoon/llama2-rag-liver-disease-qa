@@ -43,6 +43,7 @@ class Message(Base):
     sequence_number = Column(Integer, nullable=False)
     role = Column(String(20))
     content = Column(Text, nullable=False)
+    status = Column(String(20))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     conversation = relationship("Conversation", back_populates="messages")
