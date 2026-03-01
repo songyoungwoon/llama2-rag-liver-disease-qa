@@ -1,25 +1,88 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ChatInput from "./ChatInput";
 import { sendChatMessage } from "../api/chatApi";
+import { getConversationMessages } from "../api/conversationApi";
 
 type Message = {
   role: "assistant" | "user";
   content: string;
 };
 
-function ChatWindow() {
+type ChatWindowProps = {
+  selectedConversationId: string | null;
+  onConversationCreated: (conversationId: string) => void;
+  onConversationUpdated: () => void | Promise<void>;
+};
+
+function ChatWindow({
+  selectedConversationId,
+  onConversationCreated,
+  onConversationUpdated,
+}: ChatWindowProps) {
   const [messages, setMessages] = useState<Message[]>([
     { role: "assistant", content: "Ask me about liver disease guidelines." },
   ]);
   const [loading, setLoading] = useState(false);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadConversation = async () => {
+      if (!selectedConversationId) {
+        if (!cancelled) {
+          setActiveConversationId(null);
+          setMessages([{ role: "assistant", content: "Ask me about liver disease guidelines." }]);
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        setLoading(true);
+      }
+      try {
+        const conversationMessages = await getConversationMessages(selectedConversationId);
+        const loadedMessages: Message[] = conversationMessages.map((message) => ({
+          role: message.role === "user" ? "user" : "assistant",
+          content: message.content,
+        }));
+        if (!cancelled) {
+          setMessages(loadedMessages);
+          setActiveConversationId(selectedConversationId);
+        }
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to load conversation.";
+        if (!cancelled) {
+          setMessages([{ role: "assistant", content: errorMessage }]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadConversation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedConversationId]);
 
   const handleSendMessage = async (message: string) => {
     setMessages((prev) => [...prev, { role: "user", content: message }]);
     setLoading(true);
 
     try {
-      const response = await sendChatMessage(message);
-      setMessages((prev) => [...prev, { role: "assistant", content: response }]);
+      const data = await sendChatMessage(message, activeConversationId);
+      setMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
+
+      if (!activeConversationId) {
+        setActiveConversationId(data.conversation_id);
+        onConversationCreated(data.conversation_id);
+      }
+      await onConversationUpdated();
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Failed to get response from server.";
