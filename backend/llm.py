@@ -7,12 +7,28 @@ llm = Llama(
     n_threads=8
 )
 
-def generate_response(prompt: str):
-    output = llm(
-        prompt,
-        max_tokens=512,
-        temperature=0.7,
-        top_p=0.9,
-        stop=["</s>"]
+def _llm_kwargs(prompt: str):
+    return {
+        "prompt": prompt,
+        "max_tokens": 512,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "stop": ["</s>"],
+    }
+
+
+def generate_response_stream(prompt: str):
+    return llm(
+        stream=True,
+        **_llm_kwargs(prompt),
     )
-    return output["choices"][0]["text"]
+
+
+def generate_response(prompt: str):
+    chunks = []
+    for chunk in generate_response_stream(prompt):
+        token = chunk["choices"][0]["text"]
+        if token:
+            chunks.append(token)
+
+    return "".join(chunks)
