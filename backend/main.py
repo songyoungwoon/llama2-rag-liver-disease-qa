@@ -1,4 +1,5 @@
 import json
+import os
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -10,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal, engine
 from llm import generate_response, generate_response_stream
-from models import Base, Conversation, Message
+from models import Base, Conversation, Message, Document, DocumentChunk
+from rag import cosine_sim, embed_text, mmr_select
 
 app = FastAPI()
 
@@ -50,12 +52,132 @@ class ConversationMessage(BaseModel):
     sequence_number: int
 
 
+class RagSearchRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    candidate_k: int = 20
+    min_score: float | None = None
+    mmr_lambda: float = 0.5
+
+
+class RagSearchResult(BaseModel):
+    chunk_id: UUID
+    document_id: UUID
+    content: str
+    score: float
+    mmr_score: float | None = None
+    title: str | None = None
+    source: str | None = None
+
+
+class RagSearchResponse(BaseModel):
+    query: str
+    top_k: int
+    candidate_k: int
+    min_score: float | None
+    mmr_lambda: float
+    results: list[RagSearchResult]
+
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() in {"1", "true", "yes"}
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
+RAG_CANDIDATE_K = int(os.getenv("RAG_CANDIDATE_K", "20"))
+RAG_MIN_SCORE_RAW = os.getenv("RAG_MIN_SCORE")
+RAG_MIN_SCORE = float(RAG_MIN_SCORE_RAW) if RAG_MIN_SCORE_RAW else None
+RAG_MMR_LAMBDA = float(os.getenv("RAG_MMR_LAMBDA", "0.5"))
+
+
+def _retrieve_rag_candidates(
+    db: Session,
+    query: str,
+    top_k: int,
+    candidate_k: int,
+    min_score: float | None,
+    mmr_lambda: float,
+) -> list[dict]:
+    query = query.strip()
+    if not query:
+        return []
+
+    top_k = max(1, min(top_k, 50))
+    candidate_k = max(top_k, min(candidate_k, 200))
+    mmr_lambda = max(0.0, min(1.0, mmr_lambda))
+
+    query_vec = embed_text(query)
+    distance_expr = DocumentChunk.embedding.cosine_distance(query_vec)
+
+    base_query = (
+        db.query(DocumentChunk, Document)
+        .join(Document, Document.id == DocumentChunk.document_id)
+    )
+
+    if min_score is not None:
+        distance_threshold = 1 - min_score
+        base_query = base_query.filter(distance_expr <= distance_threshold)
+
+    rows = (
+        base_query
+        .order_by(distance_expr.asc())
+        .limit(candidate_k)
+        .all()
+    )
+
+    candidates: list[dict] = []
+    for chunk, document in rows:
+        if not chunk.embedding:
+            continue
+        score = cosine_sim(query_vec, chunk.embedding)
+        if min_score is not None and score < min_score:
+            continue
+        candidates.append(
+            {
+                "chunk_id": chunk.id,
+                "document_id": chunk.document_id,
+                "content": chunk.content,
+                "title": document.title,
+                "source": document.source,
+                "score": score,
+                "embedding": chunk.embedding,
+            }
+        )
+
+    if not candidates:
+        return []
+
+    if mmr_lambda >= 1 or candidate_k <= top_k:
+        return sorted(candidates, key=lambda item: item["score"], reverse=True)[:top_k]
+
+    return mmr_select(query_vec, candidates, top_k, mmr_lambda)
+
+
+def _build_rag_prompt(question: str, results: list[dict]) -> str:
+    if not results:
+        return question
+
+    context_blocks: list[str] = []
+    for idx, item in enumerate(results, start=1):
+        title = item.get("title") or "Untitled"
+        source = item.get("source") or "unknown"
+        content = item.get("content") or ""
+        context_blocks.append(
+            f"[{idx}] Title: {title}\nSource: {source}\nContent: {content}"
+        )
+
+    context_text = "\n\n".join(context_blocks)
+    return (
+        "Use the context below to answer the question. "
+        "If the context is insufficient, say so.\n\n"
+        f"Context:\n{context_text}\n\n"
+        f"Question:\n{question}"
+    )
 
 
 def _sse_event(event: str, data: dict) -> str:
@@ -177,6 +299,138 @@ def get_conversation_messages(conversation_id: UUID, db: Session = Depends(get_d
     ]
 
 
+@app.post("/rag/search", response_model=RagSearchResponse)
+def rag_search(req: RagSearchRequest, db: Session = Depends(get_db)):
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is empty")
+
+    top_k = max(1, min(req.top_k, 50))
+    candidate_k = max(top_k, min(req.candidate_k, 200))
+
+    if req.mmr_lambda < 0 or req.mmr_lambda > 1:
+        raise HTTPException(status_code=400, detail="mmr_lambda must be between 0 and 1")
+
+    if req.min_score is not None and (req.min_score < -1 or req.min_score > 1):
+        raise HTTPException(status_code=400, detail="min_score must be between -1 and 1")
+
+    selected = _retrieve_rag_candidates(
+        db,
+        query=query,
+        top_k=top_k,
+        candidate_k=candidate_k,
+        min_score=req.min_score,
+        mmr_lambda=req.mmr_lambda,
+    )
+
+    results = [
+        {
+            "chunk_id": item["chunk_id"],
+            "document_id": item["document_id"],
+            "content": item["content"],
+            "title": item["title"],
+            "source": item["source"],
+            "score": item["score"],
+            "mmr_score": item.get("mmr_score"),
+        }
+        for item in selected
+    ]
+
+    return {
+        "query": query,
+        "top_k": top_k,
+        "candidate_k": candidate_k,
+        "min_score": req.min_score,
+        "mmr_lambda": req.mmr_lambda,
+        "results": results,
+    }
+
+
+    top_k = max(1, min(req.top_k, 50))
+    candidate_k = max(top_k, min(req.candidate_k, 200))
+
+    if req.mmr_lambda < 0 or req.mmr_lambda > 1:
+        raise HTTPException(status_code=400, detail="mmr_lambda must be between 0 and 1")
+
+    if req.min_score is not None and (req.min_score < -1 or req.min_score > 1):
+        raise HTTPException(status_code=400, detail="min_score must be between -1 and 1")
+
+    query_vec = embed_text(query)
+
+    distance_expr = DocumentChunk.embedding.cosine_distance(query_vec)
+    base_query = (
+        db.query(DocumentChunk, Document)
+        .join(Document, Document.id == DocumentChunk.document_id)
+    )
+
+    if req.min_score is not None:
+        distance_threshold = 1 - req.min_score
+        base_query = base_query.filter(distance_expr <= distance_threshold)
+
+    rows = (
+        base_query
+        .order_by(distance_expr.asc())
+        .limit(candidate_k)
+        .all()
+    )
+
+    candidates: list[dict] = []
+    for chunk, document in rows:
+        if not chunk.embedding:
+            continue
+        score = cosine_sim(query_vec, chunk.embedding)
+        if req.min_score is not None and score < req.min_score:
+            continue
+        candidates.append(
+            {
+                "chunk_id": chunk.id,
+                "document_id": chunk.document_id,
+                "content": chunk.content,
+                "title": document.title,
+                "source": document.source,
+                "score": score,
+                "embedding": chunk.embedding,
+            }
+        )
+
+    if not candidates:
+        return {
+            "query": query,
+            "top_k": top_k,
+            "candidate_k": candidate_k,
+            "min_score": req.min_score,
+            "mmr_lambda": req.mmr_lambda,
+            "results": [],
+        }
+
+    if req.mmr_lambda >= 1 or candidate_k <= top_k:
+        selected = sorted(candidates, key=lambda item: item["score"], reverse=True)[:top_k]
+    else:
+        selected = mmr_select(query_vec, candidates, top_k, req.mmr_lambda)
+
+    results = [
+        {
+            "chunk_id": item["chunk_id"],
+            "document_id": item["document_id"],
+            "content": item["content"],
+            "title": item["title"],
+            "source": item["source"],
+            "score": item["score"],
+            "mmr_score": item.get("mmr_score"),
+        }
+        for item in selected
+    ]
+
+    return {
+        "query": query,
+        "top_k": top_k,
+        "candidate_k": candidate_k,
+        "min_score": req.min_score,
+        "mmr_lambda": req.mmr_lambda,
+        "results": results,
+    }
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, db: Session = Depends(get_db)):
     conversation = _resolve_conversation(db, req)
@@ -191,7 +445,22 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     )
     db.add(user_message)
 
-    response = generate_response(req.message)
+    rag_prompt = req.message
+    if RAG_ENABLED:
+        try:
+            rag_results = _retrieve_rag_candidates(
+                db,
+                query=req.message,
+                top_k=RAG_TOP_K,
+                candidate_k=RAG_CANDIDATE_K,
+                min_score=RAG_MIN_SCORE,
+                mmr_lambda=RAG_MMR_LAMBDA,
+            )
+            rag_prompt = _build_rag_prompt(req.message, rag_results)
+        except Exception:
+            rag_prompt = req.message
+
+    response = generate_response(rag_prompt)
     assistant_message = Message(
         conversation_id=conversation.id,
         sequence_number=next_sequence + 1,
@@ -224,6 +493,21 @@ def chat_stream(req: ChatRequest):
         )
         db.add(user_message)
         db.commit()
+        rag_prompt = req.message
+        if RAG_ENABLED:
+            try:
+                rag_results = _retrieve_rag_candidates(
+                    db,
+                    query=req.message,
+                    top_k=RAG_TOP_K,
+                    candidate_k=RAG_CANDIDATE_K,
+                    min_score=RAG_MIN_SCORE,
+                    mmr_lambda=RAG_MMR_LAMBDA,
+                )
+                rag_prompt = _build_rag_prompt(req.message, rag_results)
+            except Exception:
+                rag_prompt = req.message
+
     except HTTPException:
         db.rollback()
         raise
@@ -242,7 +526,7 @@ def chat_stream(req: ChatRequest):
         yield _sse_event("status", {"status": "pending"})
 
         try:
-            for chunk in generate_response_stream(req.message):
+            for chunk in generate_response_stream(rag_prompt):
                 token = chunk.get("choices", [{}])[0].get("text", "")
                 if not token:
                     continue
