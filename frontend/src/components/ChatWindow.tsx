@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { streamChatMessage, type MessageStatus } from "../api/chatApi";
 import { getConversationMessages } from "../api/conversationApi";
 import ChatInput from "./ChatInput";
@@ -70,6 +70,16 @@ type RichResponse = {
   blocks: RichBlock[];
 };
 
+type DraftPreview = {
+  text: string;
+  kind: "text" | "code" | "list";
+};
+
+type RichResponsePartial = {
+  blocks: RichBlock[];
+  draft?: DraftPreview;
+};
+
 type ChatWindowProps = {
   selectedConversationId: string | null;
   onConversationCreated: (conversationId: string) => void;
@@ -93,120 +103,374 @@ function normalizeStatus(status: string | null | undefined): MessageStatus {
   return "completed";
 }
 
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const isStringMatrix = (value: unknown): value is string[][] =>
+  Array.isArray(value) && value.every((row) => isStringArray(row));
+
+function normalizeBlock(block: Record<string, unknown>): RichBlock | null {
+  if (block.type === "title" && typeof block.text === "string") {
+    return { type: "title", text: block.text };
+  }
+
+  if (
+    block.type === "heading" &&
+    typeof block.text === "string" &&
+    typeof block.level === "number" &&
+    Number.isInteger(block.level) &&
+    block.level >= 1 &&
+    block.level <= 4
+  ) {
+    return {
+      type: "heading",
+      level: block.level,
+      text: block.text,
+    };
+  }
+
+  if (block.type === "paragraph" && typeof block.text === "string") {
+    return { type: "paragraph", text: block.text };
+  }
+
+  if (block.type === "list" && typeof block.ordered === "boolean" && isStringArray(block.items)) {
+    return {
+      type: "list",
+      ordered: block.ordered,
+      items: block.items,
+    };
+  }
+
+  if (block.type === "code" && typeof block.language === "string" && typeof block.code === "string") {
+    return {
+      type: "code",
+      language: block.language,
+      code: block.code,
+    };
+  }
+
+  if (block.type === "table" && isStringArray(block.headers) && isStringMatrix(block.rows)) {
+    return {
+      type: "table",
+      headers: block.headers,
+      rows: block.rows,
+    };
+  }
+
+  if (block.type === "quote" && typeof block.text === "string") {
+    return { type: "quote", text: block.text };
+  }
+
+  if (
+    block.type === "callout" &&
+    (block.variant === "info" ||
+      block.variant === "tip" ||
+      block.variant === "warning" ||
+      block.variant === "caution") &&
+    typeof block.title === "string" &&
+    typeof block.text === "string"
+  ) {
+    const variant = block.variant as RichCalloutBlock["variant"];
+    return {
+      type: "callout",
+      variant,
+      title: block.title,
+      text: block.text,
+    };
+  }
+
+  return null;
+}
+
+function normalizeBlocks(blocks: unknown[]): RichBlock[] {
+  const normalized: RichBlock[] = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== "object" || !("type" in block)) {
+      continue;
+    }
+    const normalizedBlock = normalizeBlock(block as Record<string, unknown>);
+    if (normalizedBlock) {
+      normalized.push(normalizedBlock);
+    }
+  }
+  return normalized;
+}
+
 function parseRichResponse(content: string): RichResponse | null {
-  const isStringArray = (value: unknown): value is string[] =>
-    Array.isArray(value) && value.every((item) => typeof item === "string");
-
-  const isStringMatrix = (value: unknown): value is string[][] =>
-    Array.isArray(value) && value.every((row) => isStringArray(row));
-
   try {
     const parsed = JSON.parse(content) as { blocks?: unknown };
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.blocks)) {
       return null;
     }
-
-    const normalizedBlocks: RichBlock[] = [];
-
-    for (const block of parsed.blocks) {
-      if (!block || typeof block !== "object" || !("type" in block)) {
-        continue;
-      }
-
-      const typedBlock = block as Record<string, unknown>;
-      if (typedBlock.type === "title" && typeof typedBlock.text === "string") {
-        normalizedBlocks.push({ type: "title", text: typedBlock.text });
-        continue;
-      }
-
-      if (
-        typedBlock.type === "heading" &&
-        typeof typedBlock.text === "string" &&
-        typeof typedBlock.level === "number" &&
-        Number.isInteger(typedBlock.level) &&
-        typedBlock.level >= 1 &&
-        typedBlock.level <= 4
-      ) {
-        normalizedBlocks.push({
-          type: "heading",
-          level: typedBlock.level,
-          text: typedBlock.text,
-        });
-        continue;
-      }
-
-      if (typedBlock.type === "paragraph" && typeof typedBlock.text === "string") {
-        normalizedBlocks.push({ type: "paragraph", text: typedBlock.text });
-        continue;
-      }
-
-      if (
-        typedBlock.type === "list" &&
-        typeof typedBlock.ordered === "boolean" &&
-        isStringArray(typedBlock.items)
-      ) {
-        normalizedBlocks.push({
-          type: "list",
-          ordered: typedBlock.ordered,
-          items: typedBlock.items,
-        });
-        continue;
-      }
-
-      if (
-        typedBlock.type === "code" &&
-        typeof typedBlock.language === "string" &&
-        typeof typedBlock.code === "string"
-      ) {
-        normalizedBlocks.push({
-          type: "code",
-          language: typedBlock.language,
-          code: typedBlock.code,
-        });
-        continue;
-      }
-
-      if (
-        typedBlock.type === "table" &&
-        isStringArray(typedBlock.headers) &&
-        isStringMatrix(typedBlock.rows)
-      ) {
-        normalizedBlocks.push({
-          type: "table",
-          headers: typedBlock.headers,
-          rows: typedBlock.rows,
-        });
-        continue;
-      }
-
-      if (typedBlock.type === "quote" && typeof typedBlock.text === "string") {
-        normalizedBlocks.push({ type: "quote", text: typedBlock.text });
-        continue;
-      }
-
-      if (
-        typedBlock.type === "callout" &&
-        (typedBlock.variant === "info" ||
-          typedBlock.variant === "tip" ||
-          typedBlock.variant === "warning" ||
-          typedBlock.variant === "caution") &&
-        typeof typedBlock.title === "string" &&
-        typeof typedBlock.text === "string"
-      ) {
-        const variant = typedBlock.variant as RichCalloutBlock["variant"];
-        normalizedBlocks.push({
-          type: "callout",
-          variant,
-          title: typedBlock.title,
-          text: typedBlock.text,
-        });
-      }
-    }
-
+    const normalizedBlocks = normalizeBlocks(parsed.blocks);
     return { blocks: normalizedBlocks };
   } catch {
     return null;
   }
+}
+
+function decodeSimpleEscape(ch: string): string {
+  if (ch === "n") {
+    return "\n";
+  }
+  if (ch === "r") {
+    return "\r";
+  }
+  if (ch === "t") {
+    return "\t";
+  }
+  if (ch === "b") {
+    return "\b";
+  }
+  if (ch === "f") {
+    return "\f";
+  }
+  if (ch === "\\") {
+    return "\\";
+  }
+  if (ch === "\"") {
+    return "\"";
+  }
+  if (ch === "/") {
+    return "/";
+  }
+  return ch;
+}
+
+function extractStringValue(partial: string, key: string): string | null {
+  const keyIndex = partial.lastIndexOf(`"${key}"`);
+  if (keyIndex === -1) {
+    return null;
+  }
+  const colonIndex = partial.indexOf(":", keyIndex + key.length + 2);
+  if (colonIndex === -1) {
+    return null;
+  }
+  const firstQuote = partial.indexOf("\"", colonIndex + 1);
+  if (firstQuote === -1) {
+    return null;
+  }
+
+  let result = "";
+  let escape = false;
+
+  for (let i = firstQuote + 1; i < partial.length; i += 1) {
+    const ch = partial[i];
+    if (escape) {
+      if (ch === "u") {
+        const hex = partial.slice(i + 1, i + 5);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          result += String.fromCharCode(parseInt(hex, 16));
+          i += 4;
+        } else {
+          result += "u";
+        }
+      } else {
+        result += decodeSimpleEscape(ch);
+      }
+      escape = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+
+    if (ch === "\"") {
+      return result;
+    }
+
+    result += ch;
+  }
+
+  return result;
+}
+
+function extractStringArrayValues(partial: string, key: string): string[] {
+  const keyIndex = partial.lastIndexOf(`"${key}"`);
+  if (keyIndex === -1) {
+    return [];
+  }
+  const arrayStart = partial.indexOf("[", keyIndex + key.length + 2);
+  if (arrayStart === -1) {
+    return [];
+  }
+
+  const values: string[] = [];
+  let inString = false;
+  let escape = false;
+  let current = "";
+
+  for (let i = arrayStart + 1; i < partial.length; i += 1) {
+    const ch = partial[i];
+
+    if (inString) {
+      if (escape) {
+        if (ch === "u") {
+          const hex = partial.slice(i + 1, i + 5);
+          if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+            current += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+          } else {
+            current += "u";
+          }
+        } else {
+          current += decodeSimpleEscape(ch);
+        }
+        escape = false;
+        continue;
+      }
+
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+
+      if (ch === "\"") {
+        values.push(current);
+        current = "";
+        inString = false;
+        continue;
+      }
+
+      current += ch;
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      current = "";
+      continue;
+    }
+
+    if (ch === "]") {
+      break;
+    }
+  }
+
+  if (inString && current) {
+    values.push(current);
+  }
+
+  return values;
+}
+
+function extractDraftPreviewFromBlock(blockText: string): DraftPreview | null {
+  const blockType = extractStringValue(blockText, "type");
+  if (!blockType) {
+    return null;
+  }
+
+  if (blockType === "code") {
+    const code = extractStringValue(blockText, "code");
+    if (!code) {
+      return null;
+    }
+    return { text: code, kind: "code" };
+  }
+
+  if (blockType === "list") {
+    const items = extractStringArrayValues(blockText, "items");
+    if (items.length === 0) {
+      return null;
+    }
+    return { text: items[items.length - 1], kind: "list" };
+  }
+
+  let text = extractStringValue(blockText, "text");
+  if (!text && blockType === "callout") {
+    text = extractStringValue(blockText, "title");
+  }
+  if (!text) {
+    return null;
+  }
+  return { text, kind: "text" };
+}
+
+function parseRichResponsePartial(content: string): RichResponsePartial | null {
+  const blocksKeyIndex = content.indexOf("\"blocks\"");
+  if (blocksKeyIndex === -1) {
+    return null;
+  }
+
+  const arrayStart = content.indexOf("[", blocksKeyIndex);
+  if (arrayStart === -1) {
+    return null;
+  }
+
+  const blocks: RichBlock[] = [];
+  let inString = false;
+  let escape = false;
+  let depth = 0;
+  let blockStart = -1;
+
+  for (let i = arrayStart + 1; i < content.length; i += 1) {
+    const ch = content[i];
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (blockStart === -1) {
+      if (ch === "{") {
+        blockStart = i;
+        depth = 1;
+      } else if (ch === "]") {
+        break;
+      }
+      continue;
+    }
+
+    if (ch === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const blockText = content.slice(blockStart, i + 1);
+        blockStart = -1;
+        try {
+          const parsedBlock = JSON.parse(blockText) as Record<string, unknown>;
+          const normalizedBlock = normalizeBlock(parsedBlock);
+          if (normalizedBlock) {
+            blocks.push(normalizedBlock);
+          }
+        } catch {
+          // Ignore malformed partial blocks
+        }
+      }
+    }
+  }
+
+  let draft: DraftPreview | undefined;
+  if (blockStart !== -1) {
+    draft = extractDraftPreviewFromBlock(content.slice(blockStart));
+  }
+
+  if (blocks.length === 0 && !draft) {
+    return null;
+  }
+
+  return { blocks, draft };
 }
 
 function renderHeadingText(level: number, text: string) {
@@ -222,15 +486,10 @@ function renderHeadingText(level: number, text: string) {
   return <h4 className="text-base font-semibold">{text}</h4>;
 }
 
-function renderAssistantContent(message: ChatMessage) {
-  const parsed = parseRichResponse(message.content);
-  if (!parsed || parsed.blocks.length === 0 || message.status !== "completed") {
-    return <p className="whitespace-pre-wrap">{message.content || (message.status === "pending" ? "Thinking..." : "")}</p>;
-  }
-
+function renderBlocks(blocks: RichBlock[]) {
   return (
-    <div className="space-y-3">
-      {parsed.blocks.map((block, index) => {
+    <>
+      {blocks.map((block, index) => {
         if (block.type === "title") {
           return (
             <h1 key={`block-${index}`} className="text-2xl font-bold">
@@ -339,6 +598,77 @@ function renderAssistantContent(message: ChatMessage) {
 
         return null;
       })}
+    </>
+  );
+}
+
+function useTypewriter(target: string, enabled: boolean, speedMs: number = 16) {
+  const [display, setDisplay] = useState("");
+
+  useEffect(() => {
+    if (!enabled) {
+      setDisplay(target);
+      return;
+    }
+
+    if (target.length < display.length) {
+      setDisplay(target);
+      return;
+    }
+
+    if (display.length >= target.length) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setDisplay(target.slice(0, display.length + 1));
+    }, speedMs);
+
+    return () => window.clearTimeout(timeout);
+  }, [target, enabled, speedMs, display]);
+
+  return display;
+}
+
+function renderDraftPreview(text: string, kind: DraftPreview["kind"]) {
+  if (kind === "code") {
+    return (
+      <pre className="p-3 text-sm overflow-x-auto rounded border border-neutral-600 bg-neutral-900">
+        <code>{text}</code>
+      </pre>
+    );
+  }
+
+  if (kind === "list") {
+    return <p className="whitespace-pre-wrap">- {text}</p>;
+  }
+
+  return <p className="whitespace-pre-wrap text-neutral-100/80">{text}</p>;
+}
+
+function AssistantContent({ message }: { message: ChatMessage }) {
+  const parsed = useMemo(() => parseRichResponse(message.content), [message.content]);
+  const partial = useMemo(() => parseRichResponsePartial(message.content), [message.content]);
+
+  const hasFullBlocks = Boolean(parsed && parsed.blocks.length > 0);
+  const blocks = hasFullBlocks ? parsed!.blocks : partial?.blocks ?? [];
+  const draft = !hasFullBlocks ? partial?.draft : undefined;
+  const draftText = draft?.text ?? "";
+  const typingEnabled = message.status !== "completed" && draftText.length > 0;
+  const typedDraft = useTypewriter(draftText, typingEnabled, 16);
+
+  if (blocks.length === 0 && !typedDraft) {
+    return (
+      <p className="whitespace-pre-wrap">
+        {message.content || (message.status === "pending" ? "Thinking..." : "")}
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {blocks.length > 0 ? renderBlocks(blocks) : null}
+      {typedDraft ? renderDraftPreview(typedDraft, draft?.kind ?? "text") : null}
     </div>
   );
 }
@@ -564,7 +894,7 @@ function ChatWindow({
             }`}
           >
             {message.role === "assistant" ? (
-              renderAssistantContent(message)
+              <AssistantContent message={message} />
             ) : (
               <p className="whitespace-pre-wrap">{message.content}</p>
             )}
@@ -581,3 +911,5 @@ function ChatWindow({
 }
 
 export default ChatWindow;
+
+

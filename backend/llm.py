@@ -7,7 +7,8 @@ except ImportError:
     LlamaGrammar = None
 
 
-SYSTEM_PROMPT = """You are a clinical assistant for liver disease QA.
+SYSTEM_PROMPT = """You are a helpful assistant that can answer general questions.
+If the question is medical, be cautious and avoid definitive diagnosis.
 Always return only one JSON object with this exact schema:
 {
   "blocks": [
@@ -98,7 +99,7 @@ def _format_prompt(user_prompt: str) -> str:
 def _llm_kwargs(user_prompt: str):
     kwargs = {
         "prompt": _format_prompt(user_prompt),
-        "max_tokens": 512,
+        "max_tokens": 2048,
         "temperature": 0.2,
         "top_p": 0.9,
         "stop": ["</s>"],
