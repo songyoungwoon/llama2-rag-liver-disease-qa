@@ -7,6 +7,16 @@ type ChatRequest = {
 
 export type MessageStatus = "pending" | "streaming" | "completed" | "failed";
 
+export type RagSource = {
+  chunk_id: string;
+  document_id: string;
+  title?: string;
+  source?: string;
+  score?: number;
+  mmr_score?: number;
+  content?: string;
+};
+
 type StreamMetaPayload = {
   conversation_id: string;
 };
@@ -17,6 +27,10 @@ type StreamStatusPayload = {
 
 type StreamTokenPayload = {
   token: string;
+};
+
+type StreamRagPayload = {
+  sources: RagSource[];
 };
 
 type StreamCompletePayload = {
@@ -34,6 +48,7 @@ type StreamChatHandlers = {
   onMeta?: (payload: StreamMetaPayload) => void;
   onStatus?: (payload: StreamStatusPayload) => void;
   onToken?: (payload: StreamTokenPayload) => void;
+  onRag?: (payload: StreamRagPayload) => void;
   onComplete?: (payload: StreamCompletePayload) => void;
   onError?: (payload: StreamErrorPayload) => void;
 };
@@ -79,6 +94,23 @@ function handleSseEvent(
 
   if (parsedEvent.event === "token") {
     handlers.onToken?.({ token: String(payload.token ?? "") });
+    return;
+  }
+
+
+  if (parsedEvent.event === "rag") {
+    const sources = Array.isArray(payload.sources) ? payload.sources : [];
+    handlers.onRag?.({
+      sources: sources.map((source) => ({
+        chunk_id: String((source as Record<string, unknown>).chunk_id ?? ""),
+        document_id: String((source as Record<string, unknown>).document_id ?? ""),
+        title: (source as Record<string, unknown>).title as string | undefined,
+        source: (source as Record<string, unknown>).source as string | undefined,
+        score: typeof (source as Record<string, unknown>).score === "number" ? (source as Record<string, unknown>).score as number : undefined,
+        mmr_score: typeof (source as Record<string, unknown>).mmr_score === "number" ? (source as Record<string, unknown>).mmr_score as number : undefined,
+        content: (source as Record<string, unknown>).content as string | undefined,
+      })),
+    });
     return;
   }
 

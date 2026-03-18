@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from uuid import UUID
 
@@ -16,6 +17,10 @@ from rag import cosine_sim, embed_text, mmr_select
 
 app = FastAPI()
 
+logging.basicConfig(level=logging.INFO)
+rag_logger = logging.getLogger("rag")
+rag_logger.setLevel(logging.INFO)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -32,10 +37,21 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: UUID | None = None
 
+class RagSource(BaseModel):
+    chunk_id: UUID
+    document_id: UUID
+    title: str | None = None
+    source: str | None = None
+    score: float | None = None
+    mmr_score: float | None = None
+    content: str | None = None
+
+
 
 class ChatResponse(BaseModel):
     conversation_id: UUID
     response: str
+    sources: list[RagSource] | None = None
 
 
 class ConversationSummary(BaseModel):
@@ -107,6 +123,15 @@ def _retrieve_rag_candidates(
     if not query:
         return []
 
+    rag_logger.info(
+        "rag_retrieve query=%r top_k=%s candidate_k=%s min_score=%s mmr_lambda=%s",
+        query,
+        top_k,
+        candidate_k,
+        min_score,
+        mmr_lambda,
+    )
+
     top_k = max(1, min(top_k, 50))
     candidate_k = max(top_k, min(candidate_k, 200))
     mmr_lambda = max(0.0, min(1.0, mmr_lambda))
@@ -130,9 +155,11 @@ def _retrieve_rag_candidates(
         .all()
     )
 
+    rag_logger.info("rag_retrieve db_rows=%s", len(rows))
+
     candidates: list[dict] = []
     for chunk, document in rows:
-        if not chunk.embedding:
+        if chunk.embedding is None:
             continue
         score = cosine_sim(query_vec, chunk.embedding)
         if min_score is not None and score < min_score:
@@ -149,13 +176,17 @@ def _retrieve_rag_candidates(
             }
         )
 
+    rag_logger.info("rag_retrieve candidates=%s", len(candidates))
     if not candidates:
         return []
 
     if mmr_lambda >= 1 or candidate_k <= top_k:
-        return sorted(candidates, key=lambda item: item["score"], reverse=True)[:top_k]
+        selected = sorted(candidates, key=lambda item: item["score"], reverse=True)[:top_k]
+    else:
+        selected = mmr_select(query_vec, candidates, top_k, mmr_lambda)
 
-    return mmr_select(query_vec, candidates, top_k, mmr_lambda)
+    rag_logger.info("rag_retrieve selected=%s scores=%s", len(selected), [round(item["score"], 4) for item in selected[:3]])
+    return selected
 
 
 def _build_rag_prompt(question: str, results: list[dict]) -> str:
@@ -178,6 +209,25 @@ def _build_rag_prompt(question: str, results: list[dict]) -> str:
         f"Context:\n{context_text}\n\n"
         f"Question:\n{question}"
     )
+
+
+def _format_rag_sources(results: list[dict]) -> list[dict]:
+    sources: list[dict] = []
+    for item in results:
+        chunk_id = item.get("chunk_id")
+        document_id = item.get("document_id")
+        sources.append(
+            {
+                "chunk_id": str(chunk_id) if chunk_id is not None else None,
+                "document_id": str(document_id) if document_id is not None else None,
+                "title": item.get("title"),
+                "source": item.get("source"),
+                "score": item.get("score"),
+                "content": item.get("content"),
+                "mmr_score": item.get("mmr_score"),
+            }
+        )
+    return sources
 
 
 def _sse_event(event: str, data: dict) -> str:
@@ -314,6 +364,15 @@ def rag_search(req: RagSearchRequest, db: Session = Depends(get_db)):
     if req.min_score is not None and (req.min_score < -1 or req.min_score > 1):
         raise HTTPException(status_code=400, detail="min_score must be between -1 and 1")
 
+    rag_logger.info(
+        "rag_search query=%r top_k=%s candidate_k=%s min_score=%s mmr_lambda=%s",
+        query,
+        top_k,
+        candidate_k,
+        req.min_score,
+        req.mmr_lambda,
+    )
+
     selected = _retrieve_rag_candidates(
         db,
         query=query,
@@ -323,90 +382,11 @@ def rag_search(req: RagSearchRequest, db: Session = Depends(get_db)):
         mmr_lambda=req.mmr_lambda,
     )
 
-    results = [
-        {
-            "chunk_id": item["chunk_id"],
-            "document_id": item["document_id"],
-            "content": item["content"],
-            "title": item["title"],
-            "source": item["source"],
-            "score": item["score"],
-            "mmr_score": item.get("mmr_score"),
-        }
-        for item in selected
-    ]
-
-    return {
-        "query": query,
-        "top_k": top_k,
-        "candidate_k": candidate_k,
-        "min_score": req.min_score,
-        "mmr_lambda": req.mmr_lambda,
-        "results": results,
-    }
-
-
-    top_k = max(1, min(req.top_k, 50))
-    candidate_k = max(top_k, min(req.candidate_k, 200))
-
-    if req.mmr_lambda < 0 or req.mmr_lambda > 1:
-        raise HTTPException(status_code=400, detail="mmr_lambda must be between 0 and 1")
-
-    if req.min_score is not None and (req.min_score < -1 or req.min_score > 1):
-        raise HTTPException(status_code=400, detail="min_score must be between -1 and 1")
-
-    query_vec = embed_text(query)
-
-    distance_expr = DocumentChunk.embedding.cosine_distance(query_vec)
-    base_query = (
-        db.query(DocumentChunk, Document)
-        .join(Document, Document.id == DocumentChunk.document_id)
+    rag_logger.info(
+        "rag_search selected=%s scores=%s",
+        len(selected),
+        [round(item["score"], 4) for item in selected[:3]],
     )
-
-    if req.min_score is not None:
-        distance_threshold = 1 - req.min_score
-        base_query = base_query.filter(distance_expr <= distance_threshold)
-
-    rows = (
-        base_query
-        .order_by(distance_expr.asc())
-        .limit(candidate_k)
-        .all()
-    )
-
-    candidates: list[dict] = []
-    for chunk, document in rows:
-        if not chunk.embedding:
-            continue
-        score = cosine_sim(query_vec, chunk.embedding)
-        if req.min_score is not None and score < req.min_score:
-            continue
-        candidates.append(
-            {
-                "chunk_id": chunk.id,
-                "document_id": chunk.document_id,
-                "content": chunk.content,
-                "title": document.title,
-                "source": document.source,
-                "score": score,
-                "embedding": chunk.embedding,
-            }
-        )
-
-    if not candidates:
-        return {
-            "query": query,
-            "top_k": top_k,
-            "candidate_k": candidate_k,
-            "min_score": req.min_score,
-            "mmr_lambda": req.mmr_lambda,
-            "results": [],
-        }
-
-    if req.mmr_lambda >= 1 or candidate_k <= top_k:
-        selected = sorted(candidates, key=lambda item: item["score"], reverse=True)[:top_k]
-    else:
-        selected = mmr_select(query_vec, candidates, top_k, req.mmr_lambda)
 
     results = [
         {
@@ -446,6 +426,7 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     db.add(user_message)
 
     rag_prompt = req.message
+    rag_sources: list[dict] = []
     if RAG_ENABLED:
         try:
             rag_results = _retrieve_rag_candidates(
@@ -457,9 +438,11 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
                 mmr_lambda=RAG_MMR_LAMBDA,
             )
             rag_prompt = _build_rag_prompt(req.message, rag_results)
-        except Exception:
+            rag_sources = _format_rag_sources(rag_results)
+        except Exception as exc:
+            rag_logger.exception("rag_retrieve failed in /chat: %s", exc)
             rag_prompt = req.message
-
+            rag_sources = []
     response = generate_response(rag_prompt)
     assistant_message = Message(
         conversation_id=conversation.id,
@@ -473,12 +456,13 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     conversation.message_count = (conversation.message_count or 0) + 2
     db.commit()
 
-    return {"conversation_id": conversation.id, "response": response}
+    return {"conversation_id": conversation.id, "response": response, "sources": rag_sources}
 
 
 @app.post("/chat/stream")
 def chat_stream(req: ChatRequest):
     db = SessionLocal()
+    rag_sources: list[dict] = []
     try:
         conversation = _resolve_conversation(db, req)
         conversation_id = conversation.id
@@ -505,8 +489,11 @@ def chat_stream(req: ChatRequest):
                     mmr_lambda=RAG_MMR_LAMBDA,
                 )
                 rag_prompt = _build_rag_prompt(req.message, rag_results)
-            except Exception:
+                rag_sources = _format_rag_sources(rag_results)
+            except Exception as exc:
+                rag_logger.exception("rag_retrieve failed in /chat/stream: %s", exc)
                 rag_prompt = req.message
+                rag_sources = []
 
     except HTTPException:
         db.rollback()
@@ -524,6 +511,8 @@ def chat_stream(req: ChatRequest):
 
         yield _sse_event("meta", {"conversation_id": str(conversation_id)})
         yield _sse_event("status", {"status": "pending"})
+        if rag_sources:
+            yield _sse_event("rag", {"sources": rag_sources})
 
         try:
             for chunk in generate_response_stream(rag_prompt):

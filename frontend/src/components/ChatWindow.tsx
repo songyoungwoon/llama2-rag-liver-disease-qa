@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { streamChatMessage, type MessageStatus } from "../api/chatApi";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { streamChatMessage, type MessageStatus, type RagSource } from "../api/chatApi";
 import { getConversationMessages } from "../api/conversationApi";
 import ChatInput from "./ChatInput";
 
@@ -8,6 +8,7 @@ type ChatMessage = {
   role: "assistant" | "user";
   content: string;
   status: MessageStatus;
+  sources?: RagSource[];
 };
 
 type RichTitleBlock = {
@@ -486,6 +487,34 @@ function renderHeadingText(level: number, text: string) {
   return <h4 className="text-base font-semibold">{text}</h4>;
 }
 
+function renderSources(sources: RagSource[]) {
+  if (!sources || sources.length === 0) {
+    return null;
+  }
+
+  return (
+    <details className="rounded border border-neutral-600 bg-neutral-800/50 px-3 py-2">
+      <summary className="cursor-pointer text-sm text-neutral-200">
+        Sources ({sources.length})
+      </summary>
+      <div className="mt-2 space-y-2 text-sm">
+        {sources.map((source, index) => (
+          <div key={`source-${index}`} className="rounded border border-neutral-700 bg-neutral-900/40 px-3 py-2">
+            <p className="font-semibold">{source.title || "Untitled"}</p>
+            <p className="text-xs text-neutral-300">{source.source || "unknown"}</p>
+            {typeof source.score === "number" ? (
+              <p className="text-xs text-neutral-400">score: {source.score.toFixed(3)}</p>
+            ) : null}
+            {source.content ? (
+              <p className="mt-1 whitespace-pre-wrap">{source.content}</p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function renderBlocks(blocks: RichBlock[]) {
   return (
     <>
@@ -656,22 +685,28 @@ function AssistantContent({ message }: { message: ChatMessage }) {
   const draftText = draft?.text ?? "";
   const typingEnabled = message.status !== "completed" && draftText.length > 0;
   const typedDraft = useTypewriter(draftText, typingEnabled, 16);
+  const sources = message.sources ?? [];
 
   if (blocks.length === 0 && !typedDraft) {
     return (
-      <p className="whitespace-pre-wrap">
-        {message.content || (message.status === "pending" ? "Thinking..." : "")}
-      </p>
+      <div className="space-y-3">
+        {renderSources(sources)}
+        <p className="whitespace-pre-wrap">
+          {message.content || (message.status === "pending" ? "Thinking..." : "")}
+        </p>
+      </div>
     );
   }
 
   return (
     <div className="space-y-3">
+      {renderSources(sources)}
       {blocks.length > 0 ? renderBlocks(blocks) : null}
       {typedDraft ? renderDraftPreview(typedDraft, draft?.kind ?? "text") : null}
     </div>
   );
 }
+
 
 function ChatWindow({
   selectedConversationId,
@@ -827,6 +862,15 @@ function ChatWindow({
               content: prev.content + token,
             }));
           },
+          onRag: ({ sources }) => {
+            if (activeStreamIdRef.current !== streamId) {
+              return;
+            }
+            updateMessage(assistantMessageId, (prev) => ({
+              ...prev,
+              sources,
+            }));
+          },
           onComplete: ({ conversation_id, response }) => {
             if (activeStreamIdRef.current !== streamId) {
               return;
@@ -911,5 +955,8 @@ function ChatWindow({
 }
 
 export default ChatWindow;
+
+
+
 
 
