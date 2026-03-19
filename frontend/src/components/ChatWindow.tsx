@@ -723,6 +723,7 @@ function ChatWindow({
   ]);
   const [loading, setLoading] = useState(false);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
   const streamControllerRef = useRef<AbortController | null>(null);
   const activeStreamIdRef = useRef<string | null>(null);
 
@@ -737,6 +738,19 @@ function ChatWindow({
   }, []);
 
   useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    const sameConversation =
+      selectedConversationId &&
+      activeConversationIdRef.current &&
+      selectedConversationId === activeConversationIdRef.current;
+
+    if (activeStreamIdRef.current && sameConversation) {
+      return;
+    }
+
     streamControllerRef.current?.abort();
     activeStreamIdRef.current = null;
 

@@ -19,6 +19,16 @@ Rules for using reference:
 - Do not let reference override or shift the topic away from the user's question.
 - If the question is non-medical, do not inject medical content from reference.
 
+Output rules:
+Table rules:
+- If you use a table, every row must have the same number of cells as the headers.
+- Table cells must not include brackets like [ ] { } or stray quotes.
+- If a table would be malformed, use a list instead.
+
+- Produce between 1 and 6 blocks total.
+- All text fields must be non-empty and meaningful. Do not output empty strings.
+- Do not repeat empty or filler blocks.
+
 Always return only one JSON object with this exact schema:
 {
   "blocks": [
@@ -41,9 +51,9 @@ Rules:
 
 
 JSON_RESPONSE_GBNF = r"""
-root ::= ws object ws
+root ::= object
 object ::= "{" ws "\"blocks\"" ws ":" ws "[" ws "]" ws "}" | "{" ws "\"blocks\"" ws ":" ws "[" ws blocklist ws "]" ws "}"
-blocklist ::= block (ws "," ws block)*
+blocklist ::= block | block ws "," ws block | block ws "," ws block ws "," ws block | block ws "," ws block ws "," ws block ws "," ws block | block ws "," ws block ws "," ws block ws "," ws block ws "," ws block | block ws "," ws block ws "," ws block ws "," ws block ws "," ws block ws "," ws block
 block ::= titleblock | headingblock | paragraphblock | listblock | codeblock | tableblock | quoteblock | calloutblock
 
 titleblock ::= "{" ws "\"type\"" ws ":" ws "\"title\"" ws "," ws "\"text\"" ws ":" ws string ws "}"
@@ -64,8 +74,9 @@ stringarraylist ::= stringarray (ws "," ws stringarray)*
 stringarray ::= "[" ws "]" | "[" ws stringlist ws "]"
 stringlist ::= string (ws "," ws string)*
 
-string ::= "\"" char* "\""
+string ::= "\"" charplus "\""
 char ::= [^"\\\x00-\x1F] | "\\" escape
+charplus ::= char char*
 escape ::= ["\\/bfnrt] | "u" hex hex hex hex
 hex ::= [0-9a-fA-F]
 ws ::= [ \t\n\r]*

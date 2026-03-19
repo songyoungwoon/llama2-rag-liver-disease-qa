@@ -233,8 +233,132 @@ def _format_rag_sources(results: list[dict]) -> list[dict]:
     return sources
 
 
+def _sanitize_rich_response(raw_response: str) -> str:
+    try:
+        data = json.loads(raw_response)
+    except Exception:
+        return raw_response
+
+    if not isinstance(data, dict):
+        return raw_response
+
+    blocks = data.get("blocks")
+    if not isinstance(blocks, list):
+        return raw_response
+
+    sanitized = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") != "table":
+            sanitized.append(block)
+            continue
+
+        headers = block.get("headers")
+        rows = block.get("rows")
+        if not isinstance(headers, list) or not isinstance(rows, list):
+            continue
+
+        header_len = len(headers)
+        if header_len == 0:
+            continue
+
+        valid_rows = []
+        malformed = False
+        for row in rows:
+            if not isinstance(row, list) or len(row) != header_len:
+                malformed = True
+                break
+            clean_row = []
+            for cell in row:
+                if not isinstance(cell, str):
+                    malformed = True
+                    break
+                if any(ch in cell for ch in "[]{}\""):
+                    malformed = True
+                    break
+                clean_row.append(cell)
+            if malformed:
+                break
+            valid_rows.append(clean_row)
+
+        if malformed:
+            # fallback: convert table into a list of "Header: value" lines if possible
+            list_items = []
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, list):
+                    continue
+                pairs = []
+                for h, v in zip(headers, row):
+                    if isinstance(h, str) and isinstance(v, str):
+                        pairs.append(f"{h}: {v}")
+                if pairs:
+                    list_items.append("; ".join(pairs))
+            if list_items:
+                sanitized.append({"type": "list", "ordered": False, "items": list_items})
+            # else drop the malformed table
+            continue
+
+        sanitized.append({"type": "table", "headers": headers, "rows": valid_rows})
+
+    data["blocks"] = sanitized
+    try:
+        return json.dumps(data, ensure_ascii=False)
+    except Exception:
+        return raw_response
+
+
 def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+class JsonCompletionDetector:
+    def __init__(self) -> None:
+        self.started = False
+        self.depth = 0
+        self.in_string = False
+        self.escape = False
+        self.pos = 0
+
+    def feed(self, text: str) -> int | None:
+        i = self.pos
+        while i < len(text):
+            ch = text[i]
+            if not self.started:
+                if ch.isspace():
+                    i += 1
+                    continue
+                if ch == "{":
+                    self.started = True
+                    self.depth = 1
+                    i += 1
+                    continue
+                i += 1
+                continue
+
+            if self.in_string:
+                if self.escape:
+                    self.escape = False
+                elif ch == "\\":
+                    self.escape = True
+                elif ch == "\"":
+                    self.in_string = False
+                i += 1
+                continue
+
+            if ch == "\"":
+                self.in_string = True
+            elif ch == "{":
+                self.depth += 1
+            elif ch == "}":
+                self.depth -= 1
+                if self.depth == 0:
+                    self.pos = i + 1
+                    return i + 1
+            i += 1
+
+        self.pos = i
+        return None
 
 
 def _resolve_conversation(db: Session, req: ChatRequest) -> Conversation:
@@ -516,7 +640,8 @@ def chat_stream(req: ChatRequest):
         db.close()
 
     def event_stream():
-        chunks: list[str] = []
+        full_text = ""
+        detector = JsonCompletionDetector()
         saved = False
         stream_started = False
 
@@ -531,14 +656,44 @@ def chat_stream(req: ChatRequest):
                 if not token:
                     continue
 
+                prev_len = len(full_text)
+                full_text += token
+                end_idx = detector.feed(full_text)
+
+                if end_idx is not None:
+                    emit_len = end_idx - prev_len
+                    if emit_len > 0:
+                        if not stream_started:
+                            stream_started = True
+                            yield _sse_event("status", {"status": "streaming"})
+                        yield _sse_event("token", {"token": token[:emit_len]})
+
+                    full_response = _sanitize_rich_response(full_text[:end_idx])
+                    _save_assistant_message(
+                        conversation_id=conversation_id,
+                        sequence_number=next_sequence + 1,
+                        content=full_response,
+                        status="completed",
+                    )
+                    saved = True
+
+                    yield _sse_event("status", {"status": "completed"})
+                    yield _sse_event(
+                        "completed",
+                        {
+                            "conversation_id": str(conversation_id),
+                            "response": full_response,
+                        },
+                    )
+                    return
+
                 if not stream_started:
                     stream_started = True
                     yield _sse_event("status", {"status": "streaming"})
 
-                chunks.append(token)
                 yield _sse_event("token", {"token": token})
 
-            full_response = "".join(chunks)
+            full_response = _sanitize_rich_response(full_text)
             _save_assistant_message(
                 conversation_id=conversation_id,
                 sequence_number=next_sequence + 1,
@@ -556,7 +711,7 @@ def chat_stream(req: ChatRequest):
                 },
             )
         except Exception as exc:
-            partial_response = "".join(chunks)
+            partial_response = _sanitize_rich_response(full_text)
             if not saved:
                 try:
                     _save_assistant_message(
