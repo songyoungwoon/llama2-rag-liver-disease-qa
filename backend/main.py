@@ -304,6 +304,14 @@ def startup():
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
     Base.metadata.create_all(bind=engine)
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS document_chunks_embedding_hnsw "
+                "ON heparag.document_chunks USING hnsw (embedding vector_cosine_ops)"
+            )
+        )
+        conn.commit()
 
 
 @app.get("/")
