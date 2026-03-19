@@ -107,7 +107,9 @@ RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() in {"1", "true", "yes"}
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
 RAG_CANDIDATE_K = int(os.getenv("RAG_CANDIDATE_K", "20"))
 RAG_MIN_SCORE_RAW = os.getenv("RAG_MIN_SCORE")
-RAG_MIN_SCORE = float(RAG_MIN_SCORE_RAW) if RAG_MIN_SCORE_RAW else None
+if RAG_MIN_SCORE_RAW is None:
+    RAG_MIN_SCORE_RAW = "0.5"
+RAG_MIN_SCORE = None if RAG_MIN_SCORE_RAW == "" else float(RAG_MIN_SCORE_RAW)
 RAG_MMR_LAMBDA = float(os.getenv("RAG_MMR_LAMBDA", "0.5"))
 
 
@@ -204,10 +206,11 @@ def _build_rag_prompt(question: str, results: list[dict]) -> str:
 
     context_text = "\n\n".join(context_blocks)
     return (
-        "Use the context below to answer the question. "
-        "If the context is insufficient, say so.\n\n"
-        f"Context:\n{context_text}\n\n"
-        f"Question:\n{question}"
+        "Task: Decide if the reference is relevant to the user's question. "
+        "If it is not directly relevant, ignore it completely and do not mention it. "
+        "Always answer the user's question first and keep the topic aligned with the question.\n\n"
+        f"User Question:\n{question}\n\n"
+        f"Reference (may be irrelevant):\n{context_text}"
     )
 
 
